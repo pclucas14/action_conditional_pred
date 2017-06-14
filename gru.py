@@ -92,7 +92,7 @@ class CGRU(nn.Module):
         super(CGRU, self).__init__()
         self.cell = CGRU_cell(input_shape, output_shape, bn=bn)
 
-    def forward(self, input, s=None, return_only_final=True):
+    def forward(self, input, s=None, future=0, return_only_final=True):
         # input is a 5d tensor of shape
         # b_s, seq_len, C, H, W --> seq_len, b_s, C, H, W
         input = torch.transpose(input, 1, 0)
@@ -104,11 +104,23 @@ class CGRU(nn.Module):
                 s = self.cell(input[t])
 
             if not return_only_final : states.append(s)
-        if return_only_final : 
-            return s
-        else : 
-            states = torch.stack(states)
-            return torch.transpose(states, 1, 0)
+
+        if future == 0 : 
+            if return_only_final : 
+                return s
+            else : 
+                states = torch.stack(states)
+                return torch.transpose(states, 1, 0)
+
+        else :
+            states = [s] if return_only_final else states 
+            # goal : return a 5d tensor with shape b_s, future + 1, C, H, W
+            # we use the output (s) as input for the next timestep
+            for t in range(future):
+                s = self.cell(s, s)
+                states.append(s)
+             
+            return torch.stack(states).transpose(1,0)
 
 
 # simple encoder structure to reduce input dimensionality
@@ -157,11 +169,15 @@ class Decoder(nn.Module):
         self.activation = activation
 
     def forward(self, input):
+        sh = input.size()
+        shrink = 2 ** len(self.deconvs)
+        val = input.contiguous().view((sh[0]*sh[1], sh[2], sh[3], sh[4])) if len(sh) == 5 else input
         for i in range(len(self.deconvs)):
-             input = self.deconvs[i](input)
-             input = self.activation(input)
+             val = self.deconvs[i](val)
+             val = self.activation(val)
 
-        return input
+        val = val.view(sh[0], sh[1], -1, sh[3] * shrink, sh[4] * shrink) if len(sh) == 5 else val
+        return val
 
 
 # test model
@@ -179,16 +195,15 @@ class TestModel(nn.Module):
 
     def forward(self, input):
         val = self.enc(input)
-        val = self.CGRU1(val, return_only_final=False)
-        val = self.CGRU2(val, return_only_final=True)
+        val = self.CGRU1(val, future=2, return_only_final=False)
+        val = self.CGRU2(val, future=2, return_only_final=True)
         val = self.dec(val)
-        # val = nn.ReLU()(val)
-
         return val
 
 seq_len = 2
 clip = 10
 batch_size = 32
+future = 2
 
 model = TestModel(ngpu=1)
 model.cuda()
@@ -202,7 +217,7 @@ data = np.load(f).astype('float32')
 
 data /= 255.; #data -= 0.5; data /= 0.5
 data = data.reshape((10000, 20, 1, 64, 64))
-data = data[:, ::2, :, :, :]
+data = data[:, ::3, :, :, :]
 print 'data ready'
 trainloader = torch.utils.data.DataLoader(data[:9000], batch_size=batch_size,                                                              shuffle=True, num_workers=2)
 testloader = torch.utils.data.DataLoader(data[9000:], batch_size=batch_size, 
@@ -210,7 +225,7 @@ testloader = torch.utils.data.DataLoader(data[9000:], batch_size=batch_size,
 
 opt = optim.Adam(model.parameters(), lr=1e-3)
 input = torch.FloatTensor(32, seq_len, 1, 64, 64).cuda()
-target = torch.FloatTensor(32, 1, 64, 64).cuda()
+target = torch.FloatTensor(32, future+1, 1, 64, 64).cuda()
 criterion = nn.MSELoss()
 
 for epoch in range(500):
@@ -219,7 +234,7 @@ for epoch in range(500):
         if data.size()[0] != batch_size : continue
         data_l = data
         input.copy_(data[:, :seq_len, :, :, :])
-        target.copy_(data[:, seq_len, :, :, :])
+        target.copy_(data[:, seq_len:seq_len+future+1, :, :, :])
         input_v = Variable(input)
         target_v = Variable(target)
 
@@ -233,9 +248,10 @@ for epoch in range(500):
     print epoch
     print("%.2f" % r_loss)
     print ""
-    imshow(out.cpu().data[0], epoch=epoch, display=False)
-    imshow(target_v.cpu().data[0], epoch=1000+epoch, display=False)
-    show_seq(data_l[:, :seq_len+1, :, :, :].cpu()[0], epoch=2000+epoch, display=False)
+    # imshow(out.cpu().data[0], epoch=epoch, display=False)
+    # imshow(target_v.cpu().data[0], epoch=1000+epoch, display=False)
+    show_seq(out.cpu().data[0], epoch=epoch, display=False)
+    show_seq(data_l[:, :seq_len+future+1, :, :, :].cpu()[0], epoch=2000+epoch, display=False)
     # if epoch % 5 ==4 : pdb.set_trace()
 
 
