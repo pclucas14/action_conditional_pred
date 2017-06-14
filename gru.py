@@ -111,28 +111,78 @@ class CGRU(nn.Module):
             return torch.transpose(states, 1, 0)
 
 
+# simple encoder structure to reduce input dimensionality
+class Encoder(nn.Module):
+    # channels : list of filters to use for each convolution (increasing order)
+    # every layer uses stride 2 and divides dim / 2. 
+    def __init__(self, input_shape, channels, filter_size=4, activation=nn.ReLU()):
+        super(Encoder, self).__init__()
+        assert filter_size % 2 == 0
+        self.input_shape = input_shape
+        padding = filter_size / 2 - 1
+        self.convs = [nn.Conv2d(input_shape[1], channels[0], filter_size, stride=2, padding=padding)]
+        for i in range(1, len(channels)):
+            self.convs.append(nn.Conv2d(channels[i-1], channels[i], filter_size, stride=2, padding=padding))
+        
+        self.convs = nn.ModuleList(self.convs)
+        self.activation = activation
+
+    def forward(self, input):
+        sh = input.size()
+        shrink = 2 ** len(self.convs)
+        val = input.contiguous().view((sh[0]*sh[1], sh[2], sh[3], sh[4])) if len(sh) == 5 else input
+        for i in range(len(self.convs)):
+             val = self.convs[i](val)
+             val = self.activation(val)
+        
+        val = val.view(sh[0], sh[1], -1, sh[3] / shrink, sh[4] / shrink) if len(sh) == 5 else val
+        return val
+        
+
+# simple decoder structure to project back to original dimensions
+class Decoder(nn.Module):
+    # channels : list of filters to use for each convolution (DECreasing order)
+    # every layer uses stride 2 and divides dim / 2. 
+    def __init__(self, output_shape, channels, filter_size=4, activation=nn.ReLU()):
+        super(Decoder, self).__init__()
+        assert filter_size % 2 == 0
+        self.output_shape = output_shape
+        padding = filter_size / 2 - 1
+        self.deconvs = []
+        for i in range(len(channels)-1):
+            self.deconvs.append(nn.ConvTranspose2d(channels[i], channels[i+1], filter_size, stride=2, padding=padding))
+        
+        self.deconvs.append(nn.ConvTranspose2d(channels[-1], output_shape[1], filter_size, stride=2, padding=padding))
+        self.deconvs = nn.ModuleList(self.deconvs)
+        self.activation = activation
+
+    def forward(self, input):
+        for i in range(len(self.deconvs)):
+             input = self.deconvs[i](input)
+             input = self.activation(input)
+
+        return input
+
+
 # test model
 class TestModel(nn.Module):
     
     def __init__(self, ngpu=1):
         super(TestModel, self).__init__()
         self.ngpu = ngpu
-        self.CGRU1 = CGRU((32, 1, 64, 64),  (32, 50, 64, 64))#,  bn=True)
-        self.CGRU2 = CGRU((32, 50, 64, 64), (32, 50, 64, 64))#, bn=True)
-        self.CGRU3 = CGRU((32, 50, 64, 64), (32, 50, 64, 64))#, bn=True)
+        self.enc = Encoder((32, 1, 64, 64), [32, 64])
+        self.CGRU1 = CGRU((32, 64, 16, 16), (32, 64, 16, 16))
+        self.CGRU2 = CGRU((32, 64, 16, 16), (32, 64, 16, 16))
+        self.dec = Decoder((32, 1, 64, 64), [64, 32])
         self.conv = nn.Conv2d(50, 1, 1, padding=0)
         self.drop = nn.Dropout2d()
 
     def forward(self, input):
-        
-        val = self.CGRU1(input, return_only_final=False)
-        for _ in range(1):
-            val = self.CGRU2(val, return_only_final=False)
+        val = self.enc(input)
+        val = self.CGRU1(val, return_only_final=False)
         val = self.CGRU2(val, return_only_final=True)
-#        val = self.CGRU3(val, return_only_final=True)
-        # val = self.drop(val)
-        val = self.conv(val)
-        val = nn.ReLU()(val)
+        val = self.dec(val)
+        # val = nn.ReLU()(val)
 
         return val
 
@@ -143,7 +193,6 @@ batch_size = 32
 model = TestModel(ngpu=1)
 model.cuda()
 model.apply(weights_init)
-
 print 'loading data'
 f = file('bouncing_mnist_test.npy', 'rb')
 #f = file('data_driver_filter_sqr.bin')
@@ -153,9 +202,8 @@ data = np.load(f).astype('float32')
 
 data /= 255.; #data -= 0.5; data /= 0.5
 data = data.reshape((10000, 20, 1, 64, 64))
-data = data[:, :, :, :, :]
+data = data[:, ::2, :, :, :]
 print 'data ready'
-
 trainloader = torch.utils.data.DataLoader(data[:9000], batch_size=batch_size,                                                              shuffle=True, num_workers=2)
 testloader = torch.utils.data.DataLoader(data[9000:], batch_size=batch_size, 
                                           shuffle=True, num_workers=2)

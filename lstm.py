@@ -136,7 +136,7 @@ data = np.load(f).astype('float32')
 
 data /= 255.; #data -= 0.5; data /= 0.5
 data = data.reshape((10000, 20, 1, 64, 64))
-data = data[:, :, :, :, :]
+data = data[:, ::2, :, :, :]
 print 'data ready'
 
 trainloader = torch.utils.data.DataLoader(data[:9000], batch_size=batch_size,                                                              shuffle=True, num_workers=2)
@@ -173,8 +173,4 @@ for epoch in range(500):
     show_seq(data_l[:, :seq_len+1, :, :, :].cpu()[0], epoch=2000+epoch, display=False)
     # if epoch % 5 ==4 : pdb.set_trace()
 
-
 pdb.set_trace()
-
-
-
