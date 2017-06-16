@@ -89,7 +89,7 @@ class CGRU_cell(nn.Module):
         
 # class to wrap up cell module : allows you to run on a whole sequence at a time
 class CGRU(nn.Module):
-    def __init__(self, input_shape, output_shape, bn=True):
+    def __init__(self, input_shape, output_shape, bn=False):
         super(CGRU, self).__init__()
         self.cell = CGRU_cell(input_shape, output_shape, bn=bn)
  
@@ -222,10 +222,11 @@ class CLSTM(nn.Module):
 class Encoder(nn.Module):
     # channels : list of filters to use for each convolution (increasing order)
     # every layer uses stride 2 and divides dim / 2. 
-    def __init__(self, input_shape, channels, filter_size=4, activation=nn.ReLU()):
+    def __init__(self, input_shape, channels, filter_size=4, activation=nn.ReLU(), bn=False):
         super(Encoder, self).__init__()
         assert filter_size % 2 == 0
         self.input_shape = input_shape
+        self.bn = bn
         padding = filter_size / 2 - 1
         self.convs = [nn.Conv2d(input_shape[1], channels[0], filter_size, stride=2, padding=padding)]
         for i in range(1, len(channels)):
@@ -234,6 +235,12 @@ class Encoder(nn.Module):
         self.convs = nn.ModuleList(self.convs)
         self.activation = activation
 
+        if bn : 
+            bns = []
+            # no batch norm for first layer
+            for i in range(1, len(channels)):
+                bns.append(nn.BatchNorm2d(channels[i]))
+            self.bns = nn.ModuleList(bns)
 
     def forward(self, input):
         sh = input.size()
@@ -241,6 +248,8 @@ class Encoder(nn.Module):
         val = input.contiguous().view((sh[0]*sh[1], sh[2], sh[3], sh[4])) if len(sh) == 5 else input
         for i in range(len(self.convs)):
              val = self.convs[i](val)
+             if self.bn and i != 0: # no batch norm for first layer 
+                 val = self.bns[i-1](val)
              val = self.activation(val)
         
         val = val.view(sh[0], sh[1], -1, sh[3] / shrink, sh[4] / shrink) if len(sh) == 5 else val
@@ -252,10 +261,11 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     # channels : list of filters to use for each convolution (DECreasing order)
     # every layer uses stride 2 and divides dim / 2. 
-    def __init__(self, output_shape, channels, filter_size=4, activation=nn.ReLU()):
+    def __init__(self, output_shape, channels, filter_size=4, activation=nn.ReLU(), bn=False):
         super(Decoder, self).__init__()
         assert filter_size % 2 == 0
         self.output_shape = output_shape
+        self.bn = bn
         padding = filter_size / 2 - 1
         self.deconvs = []
         for i in range(len(channels)-1):
@@ -264,6 +274,12 @@ class Decoder(nn.Module):
         self.deconvs.append(nn.ConvTranspose2d(channels[-1], output_shape[1], filter_size, stride=2, padding=padding))
         self.deconvs = nn.ModuleList(self.deconvs)
         self.activation = activation
+        if bn : 
+            bns = []
+            for i in range(1,len(channels)):
+                # no batch norm for last layer
+                bns.append(nn.BatchNorm2d(channels[i]))
+            self.bns = nn.ModuleList(bns)
 
 
     def forward(self, input):
@@ -272,7 +288,12 @@ class Decoder(nn.Module):
         val = input.contiguous().view((sh[0]*sh[1], sh[2], sh[3], sh[4])) if len(sh) == 5 else input
         for i in range(len(self.deconvs)):
              val = self.deconvs[i](val)
-             val = self.activation(val)
+             if i == len(self.deconvs)-1:
+                 val = nn.Tanh()(val)
+             else :
+                 if self.bn :  
+                     val = self.bns[i](val)
+                 val = self.activation(val)
 
         val = val.view(sh[0], sh[1], -1, sh[3] * shrink, sh[4] * shrink) if len(sh) == 5 else val
         return val
