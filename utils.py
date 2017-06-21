@@ -39,14 +39,16 @@ def imshow(img, grid=False, epoch=0, display=True):
 def show_seq(seq, epoch=0, display=True):
     imshow(torchvision.utils.make_grid(seq), epoch=epoch, grid=True, display=display)
 
-def load_car_data(bbs=500, batch_size=32, seq_len=10, skip=2):
-    f = file('data_driver.bin')
+def load_car_data(bbs=500, batch_size=32, seq_len=10, skip=2, big=False):
+    filename = 'data/data_driver_filter.bin' if big else 'data/data_driver.bin'
+    H, W = (80, 160) if big else (64, 64)
+    f = file(filename)
     x = np.load(f)
     # x has shape (7,3) --> 7 recording days, (frame, angle, speed)
     lengths = np.array([xx[0].shape[0] for xx in x]).astype('float32')
     probs = lengths / np.sum(lengths)
     while True : 
-        batch = np.zeros((bbs* batch_size, seq_len, 3, 64, 64))
+        batch = np.zeros((bbs* batch_size, seq_len, 3, H, W))
 	for i in range(batch_size * bbs):
 	    draw = np.random.multinomial(1, probs, size=1)
 	    day_index = np.argmax(draw)
