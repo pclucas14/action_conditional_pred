@@ -16,6 +16,7 @@ nz = 100
 ngf = 64
 ndf = 64
 nc = 3
+gpu1, gpu2 = 0, 1
 load_weights = True
 
 '''
@@ -67,6 +68,9 @@ class _netG(nn.Module):
         else : 
             self.main = nn.Sequential(
                     nn.Conv2d(nc, 64, 3, 1, 1, bias=False),
+                    nn.LeakyReLU(0.2, inplace=True), 
+                    nn.Conv2d(64, 64, 3, 1, 1, bias=False),
+                    nn.BatchNorm2d(64), 
                     nn.LeakyReLU(0.2, inplace=True), 
                     nn.Conv2d(64, 64, 3, 1, 1, bias=False),
                     nn.BatchNorm2d(64), 
@@ -127,46 +131,54 @@ netD.apply(weights_init)
 print(netD)
 
 # optimizers 
-optimizerD = optim.RMSprop(netD.parameters(), lr=1e-4)
+optimizerD = optim.RMSprop(netD.parameters(), lr=2e-4)
 optimizerG = optim.RMSprop(netG.parameters(), lr=2e-4)
 
 seq_len = 6
-batch_size = 32
-future = 0
-C = 3
+batch_size = 64
+future = 5
+C, H, W = 3, 80, 160
 lambda_mse = 50
-lambda_adv = .05
+lambda_adv = 1
 
 # prednet parameters
-input_shape = (32, 3, 80, 160)
+input_shape = (batch_size, 3, 80, 160)
 A_channels = (C, 48, 96, 192)
 R_channels = A_channels
 A_filt_sizes = (3, 3, 3)
 Ahat_filt_sizes = (3, 3, 3, 3)
 R_filt_sizes = (3, 3, 3, 3)
 
+'''
 model = PredNet(input_shape, A_channels, R_channels, A_filt_sizes, Ahat_filt_sizes, R_filt_sizes)
 if load_weights : 
-    model.load_state_dict(torch.load('models/prednet_single_frame.pth'))
+    model.load_state_dict(torch.load('models/prednet_4_frames.pth'))
     print 'PredNet weights loaded'
-model.cuda(); netD.cuda(); netG.cuda()
+model.cuda(gpu1); 
+'''
 
-generator_train = load_car_data(bbs=50, skip=2, big=True)
-input_pn = torch.FloatTensor(batch_size, seq_len, C, 80, 160).cuda()
-target_pn = torch.FloatTensor(batch_size, C, 80, 160).cuda()
+netD.cuda(); netG.cuda()
+
+generator_train = load_car_data(bbs=300, seq_len=12, skip=2, big=2)
+input_pn = torch.FloatTensor(batch_size, seq_len, C, H, W).cuda() #gpu1
+target_pn = torch.FloatTensor(batch_size, C, H, W).cuda()
+blurred = torch.FloatTensor(batch_size, C, H, W).cuda()
 
 for epoch in range(500):
-    trainloader = torch.utils.data.DataLoader(next(generator_train),
+    trainloader = torch.utils.data.DataLoader(next(generator_train)[0],
                         batch_size=batch_size,shuffle=False, num_workers=2)
     real, fake_g, fake_d = 0, 0, 0
 
     for i, data in enumerate(trainloader, 0):
-        # runt the sequence through prednet to get -blurred- output
+        # run the sequence through prednet to get -blurred- output
         input_pn.copy_(data[:, :seq_len, :, :, :])
-        target_pn.copy_(data[:, seq_len, :, :, :])
+        target_pn.copy_(data[:, seq_len + future, :, :, :])
         input_v = Variable(input_pn)
         target_v = Variable(target_pn)
-        out_pn = model(input_v, future=future)
+        # out_pn = model(input_v, future=future, return_only_final=True)
+        blurred.copy_(data.mean(1))
+        out_pn = Variable(blurred)
+        # out_pn = out_pn.cuda(gpu2)
         fake = netG(out_pn.detach())
   
         '''
@@ -192,6 +204,7 @@ for epoch in range(500):
         netG.zero_grad()
         fake_out = netD(fake)
         loss_adv = 0.5 * torch.mean((fake_out - 1) ** 2)
+        # loss_mse = torch.mean((out_pn - fake) ** 2)
         loss_mse = torch.mean((out_pn - fake) ** 2)
         fake_g += fake_out.mean()
         loss = lambda_adv * loss_adv + lambda_mse * loss_mse
@@ -203,6 +216,7 @@ for epoch in range(500):
     print("%.5f" % (fake_d.data[0] / i))
     print("%.5f" % (fake_g.data[0] / i))
     show_seq(fake.cpu().data[0], epoch=epoch, display=False)
+    show_seq(target_v.cpu().data[0], epoch=1000+epoch, display=False)
     show_seq(out_pn.cpu().data[0], epoch=2000+epoch, display=False)
     print ""
 

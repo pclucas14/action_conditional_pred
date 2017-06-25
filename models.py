@@ -146,19 +146,37 @@ class CGRU(nn.Module):
 
 class CLSTM_cell(nn.Module):
 
-    def __init__(self, input_shape, output_shape, filter_size):
+    def __init__(self, input_shape, output_shape, filter_size, extra=False):
 	super(CLSTM_cell, self).__init__()
 
 	self.input_shape = input_shape
 	self.output_shape = output_shape
+        self.extra = extra
 	padding = (filter_size - 1) / 2
-	self.conv = nn.Conv2d(input_shape[1] + output_shape[1], 4 * output_shape[1], filter_size, 1, padding)
+	self.conv = nn.Conv2d(input_shape[1] + output_shape[1] + extra, 4 * output_shape[1], filter_size, 1, padding)
+        if extra :
+            # we need a convolution that project [speed, angle] --> hidden_channel ** 2
+            self.dense_extra = nn.Linear(15, output_shape[-2] * output_shape[-1])
 
 
-    def forward(self, input, hidden_state):
+
+    # extra is FloatTensor [steering angle, speed] (already normalized)
+    def forward(self, input, hidden_state, extra=None):
 	h_t, c_t = hidden_state
-	combined = torch.cat((input, h_t), 1) 
-        all_conv = self.conv(combined)
+        if extra is not None: 
+            square = self.dense_extra(extra) # maps [b_s, 2] --> [b_s, n ** 2]
+            square = nn.ReLU()(square)
+            square = square.view(-1, self.output_shape[-2], self.output_shape[-1])
+            try : 
+                combined = torch.cat([input, h_t, square.unsqueeze(1)], 1)
+            except : 
+                pdb.set_trace()
+        else : 
+	    combined = torch.cat((input, h_t), 1)
+        try : 
+            all_conv = self.conv(combined)
+        except : 
+            pdb.set_trace()
 	i, f, o, c_tild = torch.split(all_conv, self.output_shape[1], dim=1)
 	
 	i = torch.sigmoid(i)
@@ -179,7 +197,7 @@ class CLSTM_cell(nn.Module):
 class PredNet(nn.Module):
     
     def __init__(self, input_shape, A_channels, R_channels, A_filt_sizes, 
-                 Ahat_filt_sizes, R_filt_sizes, pixel_max=1.):
+                 Ahat_filt_sizes, R_filt_sizes, pixel_max=1., extra=False):
         super(PredNet, self).__init__()
 
         self.n_layers = len(A_channels)
@@ -203,7 +221,7 @@ class PredNet(nn.Module):
             channels_in = channels_in + R_channels[i+1] if i < self.n_layers -1 else channels_in
             conv_lstms.append(CLSTM_cell((bs, channels_in,   H // ds_factor, W // ds_factor), 
                                          (bs, R_channels[i], H // ds_factor, W // ds_factor),
-                                          R_filt_sizes[i]))
+                                          R_filt_sizes[i], extra=extra))
 
         # next, we create the convolutions to go from E_l to A_{l+1}
         e_to_a_convs = []
@@ -242,7 +260,7 @@ class PredNet(nn.Module):
 
 
     # to not overcrowd foward method, we define a step method that handles 1 timestep
-    def step(self, a_0, r_prev, e_prev):
+    def step(self, a_0, r_prev, e_prev, extra=None):
         # to match previous CLSTM implementation, r_prev is list of tupples [(h1, c1), ..., (hl, cl)]
         r_t = []
         e_t = []
@@ -255,7 +273,7 @@ class PredNet(nn.Module):
             else : 
                 input = e_prev[l]
 
-            h_l, c_l = self.conv_lstms[l](input, r_prev[l])
+            h_l, c_l = self.conv_lstms[l](input, r_prev[l], extra=extra)
             # since we are going backward, always add to the start to preserve ordering
             r_t.insert(0, (h_l, c_l))
 
@@ -281,21 +299,23 @@ class PredNet(nn.Module):
         return frame_pred, r_t, e_t
 
 
-    def forward(self, input, future=0):
+    def forward(self, input, future=0, extra=None, return_only_final=False):
         input = torch.transpose(input, 1, 0) # b_s, seq_len, .. --> seq_len, b_s
         r, e = self.get_initial_states()
         for i in range(input.size(0)):
-            pred, r, e = self.step(input[i], r, e)
+            extra_i = extra[:, i, :] if extra is not None else None
+            pred, r, e = self.step(input[i], r, e, extra=extra_i)
         if future == 0 : 
             return pred
 
-        preds = [pred]
+        if not return_only_final : preds = [pred]
         for i in range(future):
-            pred, r, e = self.step(pred, r, e)
-            preds.append(pred)
+            extra_i = extra[:, input.size(0) + i, :] if extra is not None else None
+            pred, r, e = self.step(pred, r, e, extra=extra_i)
+            if not return_only_final : preds.append(pred)
 
         # TODO : put back in original ordering
-        return torch.stack(preds, dim=1)
+        return pred if return_only_final else torch.stack(preds, dim=1)
 
 
 
